@@ -1,0 +1,77 @@
+# ========================
+# SECRETS — NEVER COMMIT
+# ========================
+.env
+.env.local
+.env.production
+*.key
+*.pem
+
+# ========================
+# Python
+# ========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# uv
+.python-version
+
+# ========================
+# IDE
+# ========================
+.vscode/settings.json
+.vscode/launch.json
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ========================
+# Data — NEVER COMMIT
+# ========================
+data/portfolios/
+data/trades/
+*.csv
+!tests/fixtures/*.csv
+
+# ========================
+# Database
+# ========================
+*.db
+*.sqlite3
+
+# ========================
+# Testing
+# ========================
+.coverage
+htmlcov/
+.pytest_cache/
+
+# ========================
+# Docker
+# ========================
+docker-compose.override.yml
+
+# ========================
+# Logs
+# ========================
+*.log
+logs/
+
+# ========================
+# OS
+# ========================
+.DS_Store
+Thumbs.db

@@ -1,0 +1,74 @@
+[
+  {
+    "model": "claude-sonnet-4-20250514",
+    "input_tokens": 687,
+    "output_tokens": 619,
+    "cost_usd": 0.011346,
+    "query_type": "analysis",
+    "timestamp": "2026-02-19 22:46:20.445855"
+  },
+  {
+    "model": "gpt-4o-mini",
+    "input_tokens": 139,
+    "output_tokens": 388,
+    "cost_usd": 0.000254,
+    "query_type": "routine",
+    "timestamp": "2026-02-21 08:08:28.697540"
+  },
+  {
+    "model": "claude-sonnet-4-20250514",
+    "input_tokens": 950,
+    "output_tokens": 1038,
+    "cost_usd": 0.01842,
+    "query_type": "analysis",
+    "timestamp": "2026-02-21 08:09:07.601058"
+  },
+  {
+    "model": "claude-sonnet-4-20250514",
+    "input_tokens": 687,
+    "output_tokens": 551,
+    "cost_usd": 0.010326,
+    "query_type": "analysis",
+    "timestamp": "2026-02-21 08:09:30.560471"
+  },
+  {
+    "model": "claude-sonnet-4-20250514",
+    "input_tokens": 687,
+    "output_tokens": 571,
+    "cost_usd": 0.010626,
+    "query_type": "analysis",
+    "timestamp": "2026-02-21 08:18:00.934782"
+  },
+  {
+    "model": "claude-sonnet-4-20250514",
+    "input_tokens": 952,
+    "output_tokens": 1033,
+    "cost_usd": 0.018351,
+    "query_type": "analysis",
+    "timestamp": "2026-02-21 08:21:23.709401"
+  },
+  {
+    "model": "gpt-4o-mini",
+    "input_tokens": 139,
+    "output_tokens": 348,
+    "cost_usd": 0.00023,
+    "query_type": "routine",
+    "timestamp": "2026-02-21 08:41:15.631542"
+  },
+  {
+    "model": "gpt-4o-mini",
+    "input_tokens": 137,
+    "output_tokens": 358,
+    "cost_usd": 0.000235,
+    "query_type": "routine",
+    "timestamp": "2026-02-21 08:43:50.981530"
+  },
+  {
+    "model": "claude-sonnet-4-20250514",
+    "input_tokens": 689,
+    "output_tokens": 590,
+    "cost_usd": 0.010917,
+    "query_type": "analysis",
+    "timestamp": "2026-02-21 08:46:05.961242"
+  }
+]
