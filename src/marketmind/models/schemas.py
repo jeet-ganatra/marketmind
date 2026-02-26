@@ -73,3 +73,69 @@ class CostRecord(BaseModel):
     cost_usd: float
     query_type: str  # "routine" or "analysis"
     timestamp: datetime = Field(default_factory=datetime.now)
+
+
+# ──────────────────────────────────────────────────────────
+# Phase 2: Portfolio Models
+# ──────────────────────────────────────────────────────────
+
+
+class User(BaseModel):
+    """A MarketMind user (supports multi-user portfolios)."""
+
+    id: int | None = None
+    username: str
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class Trade(BaseModel):
+    """A single buy or sell transaction."""
+
+    id: int | None = None
+    user_id: int
+    ticker: str
+    trade_type: str  # "buy" or "sell"
+    shares: float
+    price_per_share: float
+    total_amount: float
+    trade_date: datetime
+    source: str = "manual"  # "manual", "robinhood_csv", etc.
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class Holding(BaseModel):
+    """Current position in a stock (derived from trades via FIFO)."""
+
+    id: int | None = None
+    user_id: int
+    ticker: str
+    shares: float
+    avg_cost_basis: float
+    total_cost_basis: float
+    first_purchase_date: datetime | None = None
+    last_trade_date: datetime | None = None
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+
+class WatchlistItem(BaseModel):
+    """A ticker on the user's watchlist."""
+
+    id: int | None = None
+    user_id: int
+    ticker: str
+    notes: str = ""
+    added_at: datetime = Field(default_factory=datetime.now)
+
+
+class StockAnalysisCache(BaseModel):
+    """Cached AI analysis result (shared across users)."""
+
+    id: int | None = None
+    ticker: str
+    analysis_type: str  # "comprehensive", "educational", "portfolio", "holding", "potential_buy"
+    user_id: int | None = None
+    summary: str
+    detailed_analysis: str
+    model_used: str
+    cost_usd: float
+    created_at: datetime = Field(default_factory=datetime.now)

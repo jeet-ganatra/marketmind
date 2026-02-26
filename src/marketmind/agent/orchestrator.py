@@ -8,19 +8,25 @@ This is the central module that:
 4. Routes to the appropriate model
 5. Returns structured results
 
-In Phase 1, this is a simple procedural flow.
-In Phase 3+, this becomes a LangGraph agent that autonomously
-decides which tools to call.
+Phase 1: Single-stock analysis pipeline.
+Phase 2: Portfolio-aware analysis with caching.
 """
+
+from __future__ import annotations
 
 from rich.console import Console
 
 from marketmind.config import Settings
 from marketmind.llm.router import LLMRouter
-from marketmind.models.schemas import AnalysisResult
+from marketmind.models.schemas import AnalysisResult, Holding, StockAnalysisCache, StockPrice
 from marketmind.prompts.templates import (
     COMPREHENSIVE_ANALYSIS_PROMPT,
     EDUCATIONAL_ANALYSIS_PROMPT,
+    EDUCATIONAL_PORTFOLIO_SECTION,
+    HOLDING_ANALYSIS_PROMPT,
+    PORTFOLIO_ANALYSIS_PROMPT,
+    PORTFOLIO_ANALYSIS_SYSTEM,
+    POTENTIAL_BUY_PROMPT,
     QUICK_PRICE_PROMPT,
     STOCK_ANALYSIS_SYSTEM,
 )
@@ -32,35 +38,58 @@ console = Console()
 
 class MarketMindAgent:
     """
-    Main agent that orchestrates stock analysis.
+    Main agent that orchestrates stock and portfolio analysis.
 
-    This is intentionally simple in Phase 1 — a linear pipeline:
-    fetch data → format prompt → call LLM → return result.
-
-    Later phases will replace this with LangGraph for dynamic tool selection.
+    Phase 1: fetch data → format prompt → call LLM → return result.
+    Phase 2: adds portfolio context, analysis caching, and multi-method analysis.
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, db=None) -> None:
         self.settings = settings
         self.router = LLMRouter(settings)
+        self.db = db
+        self._repo = None
+
+    @property
+    def repo(self):
+        """Lazily create repository only when needed."""
+        if self._repo is None and self.db is not None:
+            from marketmind.db.repository import PortfolioRepository
+
+            self._repo = PortfolioRepository(self.db)
+        return self._repo
+
+    # ──────────────────────────────────────────────
+    # Phase 1: Single-stock analysis
+    # ──────────────────────────────────────────────
 
     def analyze(self, ticker: str, explain: bool = False) -> AnalysisResult:
         """
         Run a comprehensive analysis on a stock.
-
-        This is the main entry point. It:
-        1. Fetches price, fundamentals, history, and analyst data
-        2. Formats everything into a prompt
-        3. Sends to Claude Sonnet for deep analysis
-        4. Returns a structured result
 
         Args:
             ticker: Stock ticker symbol
             explain: If True, uses educational prompt with beginner-friendly explanations
         """
         ticker = ticker.upper()
+        analysis_type = "educational" if explain else "comprehensive"
         mode_label = " (educational mode)" if explain else ""
         console.print(f"\n[bold blue]Analyzing {ticker}{mode_label}...[/bold blue]\n")
+
+        # Check cache first
+        if self.repo:
+            cached = self.repo.get_recent_analysis(ticker, analysis_type)
+            if cached:
+                console.print("  [green]Using cached analysis (< 24h old)[/green]\n")
+                return AnalysisResult(
+                    ticker=ticker,
+                    analysis_type=analysis_type,
+                    summary=cached.summary,
+                    detailed_analysis=cached.detailed_analysis,
+                    data_sources=["cache"],
+                    model_used=cached.model_used,
+                    cost_usd=0,
+                )
 
         # Step 1: Fetch all data
         console.print("  📊 Fetching price data...")
@@ -76,8 +105,6 @@ class MarketMindAgent:
         analysts = get_analyst_summary(ticker)
 
         # Step 2: Format data for the prompt
-        # We convert to readable strings. The LLM needs human-readable context,
-        # not raw JSON (though it can handle JSON — readable is better for analysis).
         price_str = _format_price(price)
         fundamentals_str = _format_fundamentals(fundamentals)
         history_str = _format_history(history)
@@ -94,7 +121,6 @@ class MarketMindAgent:
         )
 
         # Step 3: Call LLM (analysis task → Claude Sonnet)
-        # Educational mode needs more tokens for the longer explanations
         console.print("  🤖 Running AI analysis (Claude Sonnet)...\n")
         result = self.router.call(
             prompt=prompt,
@@ -106,9 +132,9 @@ class MarketMindAgent:
         # Step 4: Build structured result
         cost = result["cost_record"].cost_usd if result["cost_record"] else 0
 
-        return AnalysisResult(
+        analysis_result = AnalysisResult(
             ticker=ticker,
-            analysis_type="educational" if explain else "comprehensive",
+            analysis_type=analysis_type,
             summary=_extract_summary(result["content"]),
             detailed_analysis=result["content"],
             data_sources=_list_data_sources(price, fundamentals, history, analysts),
@@ -116,13 +142,21 @@ class MarketMindAgent:
             cost_usd=cost,
         )
 
-    def quick_price(self, ticker: str) -> str:
-        """
-        Quick price check — uses cheap model (GPT-4o-mini).
+        # Cache the result
+        if self.repo:
+            self.repo.save_analysis(StockAnalysisCache(
+                ticker=ticker,
+                analysis_type=analysis_type,
+                summary=analysis_result.summary,
+                detailed_analysis=analysis_result.detailed_analysis,
+                model_used=analysis_result.model_used,
+                cost_usd=analysis_result.cost_usd,
+            ))
 
-        This is for "What's AAPL at?" type questions where you don't
-        need deep analysis, just a quick status.
-        """
+        return analysis_result
+
+    def quick_price(self, ticker: str) -> str:
+        """Quick price check — uses cheap model (GPT-4o-mini)."""
         ticker = ticker.upper()
         price = get_stock_price(ticker)
 
@@ -140,10 +174,237 @@ class MarketMindAgent:
 
         result = self.router.call(
             prompt=prompt,
-            task_type="routine",  # → GPT-4o-mini (cheap)
+            task_type="routine",
         )
 
         return result["content"]
+
+    # ──────────────────────────────────────────────
+    # Phase 2: Portfolio analysis
+    # ──────────────────────────────────────────────
+
+    def analyze_portfolio(self, user_id: int, explain: bool = False) -> AnalysisResult:
+        """
+        Analyze the user's entire portfolio.
+
+        Loads all holdings, fetches live prices and fundamentals,
+        calculates portfolio-level metrics, and sends to Claude Sonnet.
+        """
+        if not self.repo:
+            return _error_result("portfolio", "Database not initialized")
+
+        holdings = self.repo.get_holdings(user_id)
+        if not holdings:
+            return _error_result("portfolio", "No holdings found. Add positions first.")
+
+        console.print("\n[bold blue]Analyzing portfolio...[/bold blue]\n")
+
+        # Fetch live data for each holding
+        console.print("  📊 Fetching live prices and fundamentals...")
+        prices: dict[str, StockPrice | None] = {}
+        market_data_lines: list[str] = []
+
+        for h in holdings:
+            price = get_stock_price(h.ticker)
+            prices[h.ticker] = price
+            fundamentals = get_fundamentals(h.ticker)
+            market_data_lines.append(f"\n### {h.ticker}")
+            market_data_lines.append(_format_price(price))
+            if fundamentals:
+                market_data_lines.append(
+                    f"Sector: {fundamentals.sector} | P/E: "
+                    f"{fundamentals.pe_ratio:.2f}" if fundamentals.pe_ratio else "N/A"
+                )
+
+        # Calculate portfolio metrics
+        holdings_str = _format_holdings_for_prompt(holdings, prices)
+        total_value, total_cost, total_pnl, total_pnl_pct = _calc_portfolio_metrics(
+            holdings, prices
+        )
+
+        edu_section = EDUCATIONAL_PORTFOLIO_SECTION if explain else ""
+        prompt = PORTFOLIO_ANALYSIS_PROMPT.format(
+            holdings_data=holdings_str,
+            market_data="\n".join(market_data_lines),
+            num_holdings=len(holdings),
+            total_value=total_value,
+            total_cost=total_cost,
+            total_pnl=total_pnl,
+            total_pnl_pct=total_pnl_pct,
+            educational_section=edu_section,
+        )
+
+        console.print("  🤖 Running AI portfolio analysis (Claude Sonnet)...\n")
+        result = self.router.call(
+            prompt=prompt,
+            system_prompt=PORTFOLIO_ANALYSIS_SYSTEM,
+            task_type="analysis",
+            max_tokens=8192 if explain else None,
+        )
+
+        cost = result["cost_record"].cost_usd if result["cost_record"] else 0
+        return AnalysisResult(
+            ticker="PORTFOLIO",
+            analysis_type="portfolio_educational" if explain else "portfolio",
+            summary=_extract_summary(result["content"]),
+            detailed_analysis=result["content"],
+            data_sources=["yfinance:price", "yfinance:fundamentals", "database:holdings"],
+            model_used=result["model"],
+            cost_usd=cost,
+        )
+
+    def analyze_holding(
+        self, ticker: str, user_id: int, explain: bool = False
+    ) -> AnalysisResult:
+        """Analyze a specific holding in portfolio context."""
+        if not self.repo:
+            return _error_result(ticker, "Database not initialized")
+
+        ticker = ticker.upper()
+        holding = self.repo.get_holding(user_id, ticker)
+        if not holding:
+            return _error_result(ticker, f"No holding found for {ticker}")
+
+        console.print(f"\n[bold blue]Analyzing {ticker} holding...[/bold blue]\n")
+
+        # Get portfolio context
+        all_holdings = self.repo.get_holdings(user_id)
+        all_prices: dict[str, StockPrice | None] = {}
+        for h in all_holdings:
+            all_prices[h.ticker] = get_stock_price(h.ticker)
+
+        total_value, _, _, _ = _calc_portfolio_metrics(all_holdings, all_prices)
+
+        # Fetch detailed data for this holding
+        console.print("  📊 Fetching data...")
+        price = all_prices.get(ticker) or get_stock_price(ticker)
+        fundamentals = get_fundamentals(ticker)
+        history = get_price_history(ticker, period="3mo")
+        analysts = get_analyst_summary(ticker)
+
+        current_price = price.current_price if price else 0
+        market_value = holding.shares * current_price
+        pnl = market_value - holding.total_cost_basis
+        pnl_pct = (pnl / holding.total_cost_basis * 100) if holding.total_cost_basis > 0 else 0
+        position_pct = (market_value / total_value * 100) if total_value > 0 else 0
+
+        edu_section = EDUCATIONAL_PORTFOLIO_SECTION if explain else ""
+        prompt = HOLDING_ANALYSIS_PROMPT.format(
+            ticker=ticker,
+            shares=holding.shares,
+            avg_cost=holding.avg_cost_basis,
+            total_cost=holding.total_cost_basis,
+            current_price=current_price,
+            market_value=market_value,
+            pnl=pnl,
+            pnl_pct=pnl_pct,
+            fundamental_data=_format_fundamentals(fundamentals),
+            history_data=_format_history(history),
+            analyst_data=_format_analysts(analysts),
+            position_pct=position_pct,
+            portfolio_value=total_value,
+            educational_section=edu_section,
+        )
+
+        console.print("  🤖 Running AI holding analysis (Claude Sonnet)...\n")
+        result = self.router.call(
+            prompt=prompt,
+            system_prompt=PORTFOLIO_ANALYSIS_SYSTEM,
+            task_type="analysis",
+            max_tokens=8192 if explain else None,
+        )
+
+        cost = result["cost_record"].cost_usd if result["cost_record"] else 0
+        analysis_result = AnalysisResult(
+            ticker=ticker,
+            analysis_type="holding_educational" if explain else "holding",
+            summary=_extract_summary(result["content"]),
+            detailed_analysis=result["content"],
+            data_sources=_list_data_sources(price, fundamentals, history, analysts)
+            + ["database:holdings"],
+            model_used=result["model"],
+            cost_usd=cost,
+        )
+
+        # Cache the result
+        self.repo.save_analysis(StockAnalysisCache(
+            ticker=ticker,
+            analysis_type=analysis_result.analysis_type,
+            summary=analysis_result.summary,
+            detailed_analysis=analysis_result.detailed_analysis,
+            model_used=analysis_result.model_used,
+            cost_usd=analysis_result.cost_usd,
+        ))
+
+        return analysis_result
+
+    def evaluate_potential_buy(
+        self, ticker: str, user_id: int, explain: bool = False
+    ) -> AnalysisResult:
+        """Evaluate a stock as a potential buy given portfolio context."""
+        ticker = ticker.upper()
+        console.print(f"\n[bold blue]Evaluating {ticker} as potential buy...[/bold blue]\n")
+
+        # Fetch stock data
+        console.print("  📊 Fetching stock data...")
+        price = get_stock_price(ticker)
+        fundamentals = get_fundamentals(ticker)
+        history = get_price_history(ticker, period="3mo")
+        analysts = get_analyst_summary(ticker)
+
+        # Get portfolio context
+        portfolio_summary = "No portfolio data available."
+        if self.repo:
+            holdings = self.repo.get_holdings(user_id)
+            if holdings:
+                prices: dict[str, StockPrice | None] = {}
+                for h in holdings:
+                    prices[h.ticker] = get_stock_price(h.ticker)
+                portfolio_summary = _format_portfolio_summary(holdings, prices)
+
+        edu_section = EDUCATIONAL_PORTFOLIO_SECTION if explain else ""
+        prompt = POTENTIAL_BUY_PROMPT.format(
+            ticker=ticker,
+            price_data=_format_price(price),
+            fundamental_data=_format_fundamentals(fundamentals),
+            history_data=_format_history(history),
+            analyst_data=_format_analysts(analysts),
+            portfolio_summary=portfolio_summary,
+            educational_section=edu_section,
+        )
+
+        console.print("  🤖 Running AI evaluation (Claude Sonnet)...\n")
+        result = self.router.call(
+            prompt=prompt,
+            system_prompt=PORTFOLIO_ANALYSIS_SYSTEM,
+            task_type="analysis",
+            max_tokens=8192 if explain else None,
+        )
+
+        cost = result["cost_record"].cost_usd if result["cost_record"] else 0
+        analysis_result = AnalysisResult(
+            ticker=ticker,
+            analysis_type="potential_buy_educational" if explain else "potential_buy",
+            summary=_extract_summary(result["content"]),
+            detailed_analysis=result["content"],
+            data_sources=_list_data_sources(price, fundamentals, history, analysts)
+            + ["database:portfolio"],
+            model_used=result["model"],
+            cost_usd=cost,
+        )
+
+        # Cache
+        if self.repo:
+            self.repo.save_analysis(StockAnalysisCache(
+                ticker=ticker,
+                analysis_type=analysis_result.analysis_type,
+                summary=analysis_result.summary,
+                detailed_analysis=analysis_result.detailed_analysis,
+                model_used=analysis_result.model_used,
+                cost_usd=analysis_result.cost_usd,
+            ))
+
+        return analysis_result
 
 
 # ──────────────────────────────────────────────
@@ -220,24 +481,80 @@ def _format_analysts(analysts) -> str:
     return "\n".join(lines)
 
 
+def _format_holdings_for_prompt(
+    holdings: list[Holding], prices: dict[str, StockPrice | None]
+) -> str:
+    """Format all holdings with live prices into a prompt-ready string."""
+    lines = []
+    for h in holdings:
+        price = prices.get(h.ticker)
+        current = price.current_price if price else 0
+        market_val = h.shares * current
+        pnl = market_val - h.total_cost_basis
+        pnl_pct = (pnl / h.total_cost_basis * 100) if h.total_cost_basis > 0 else 0
+        lines.append(
+            f"- {h.ticker}: {h.shares:.4f} shares @ ${h.avg_cost_basis:.2f} avg cost | "
+            f"Current: ${current:.2f} | Value: ${market_val:,.2f} | "
+            f"P&L: ${pnl:,.2f} ({pnl_pct:+.2f}%)"
+        )
+    return "\n".join(lines)
+
+
+def _format_portfolio_summary(
+    holdings: list[Holding], prices: dict[str, StockPrice | None]
+) -> str:
+    """Format a brief portfolio summary for the potential buy prompt."""
+    total_value, total_cost, total_pnl, total_pnl_pct = _calc_portfolio_metrics(
+        holdings, prices
+    )
+    lines = [
+        f"Total Portfolio Value: ${total_value:,.2f}",
+        f"Total Cost Basis: ${total_cost:,.2f}",
+        f"Overall P&L: ${total_pnl:,.2f} ({total_pnl_pct:+.2f}%)",
+        f"Number of Holdings: {len(holdings)}",
+        "",
+        "Current Holdings:",
+    ]
+    for h in holdings:
+        price = prices.get(h.ticker)
+        current = price.current_price if price else 0
+        market_val = h.shares * current
+        pct_of_portfolio = (market_val / total_value * 100) if total_value > 0 else 0
+        lines.append(f"  - {h.ticker}: ${market_val:,.2f} ({pct_of_portfolio:.1f}% of portfolio)")
+    return "\n".join(lines)
+
+
+def _calc_portfolio_metrics(
+    holdings: list[Holding], prices: dict[str, StockPrice | None]
+) -> tuple[float, float, float, float]:
+    """Calculate total value, cost, P&L, and P&L % for a portfolio."""
+    total_value = 0.0
+    total_cost = 0.0
+    for h in holdings:
+        price = prices.get(h.ticker)
+        current = price.current_price if price else 0
+        total_value += h.shares * current
+        total_cost += h.total_cost_basis
+    total_pnl = total_value - total_cost
+    total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0
+    return total_value, total_cost, total_pnl, total_pnl_pct
+
+
 def _extract_summary(analysis_text: str) -> str:
     """
     Extract a 1-2 sentence summary from the full analysis.
 
-    Looks for a "Bottom Line" section. If not found, takes the first 2 sentences.
+    Looks for a "Bottom Line" section. If not found, takes the first 200 chars.
     """
-    # Try to find a "Bottom Line" section
     for marker in ["**Bottom Line**", "Bottom Line:", "## Bottom Line"]:
         if marker in analysis_text:
             after_marker = analysis_text.split(marker, 1)[1].strip()
-            # Take first 2-3 sentences
             sentences = after_marker.split(".")
             summary = ".".join(sentences[:3]).strip()
             if summary and not summary.endswith("."):
                 summary += "."
             return summary
 
-    # Fallback: first 200 chars
     return analysis_text[:200].strip() + "..."
 
 
@@ -253,3 +570,16 @@ def _list_data_sources(price, fundamentals, history, analysts) -> list[str]:
     if analysts:
         sources.append("yfinance:analysts")
     return sources
+
+
+def _error_result(ticker: str, message: str) -> AnalysisResult:
+    """Return an error AnalysisResult."""
+    return AnalysisResult(
+        ticker=ticker,
+        analysis_type="error",
+        summary=message,
+        detailed_analysis=message,
+        data_sources=[],
+        model_used="none",
+        cost_usd=0,
+    )

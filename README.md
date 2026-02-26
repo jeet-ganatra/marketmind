@@ -89,10 +89,16 @@ marketmind/
 └── .env.example
 ```
 
+## Engineering Decisions
+
+We document significant technical decisions and interesting bugs in [`docs/engineering-decisions/`](docs/engineering-decisions/):
+
+- [FIFO Cost Basis and Stock Splits](docs/engineering-decisions/001-fifo-stock-split.md) — How a skipped CSV record caused the largest portfolio position to silently vanish, and why the obvious fix was subtly wrong
+
 ## Development Roadmap
 
 - [x] Phase 1: CLI + basic stock analysis with LLM
-- [ ] Phase 2: Portfolio tracking & multi-user support
+- [x] Phase 2: Portfolio tracking & multi-user support
 - [ ] Phase 3: RAG over earnings transcripts & SEC filings
 - [ ] Phase 4: Advanced agent (multi-step reasoning, stock screener)
 - [ ] Phase 5: AWS deployment
