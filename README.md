@@ -94,6 +94,7 @@ marketmind/
 We document significant technical decisions and interesting bugs in [`docs/engineering-decisions/`](docs/engineering-decisions/):
 
 - [FIFO Cost Basis and Stock Splits](docs/engineering-decisions/001-fifo-stock-split.md) — How a skipped CSV record caused the largest portfolio position to silently vanish, and why the obvious fix was subtly wrong
+- [When a Stock Split Isn't a Split: MRGS Codes](docs/engineering-decisions/002-mrgs-merger-splits.md) — Same bug, different transaction code, and why the fix required its own ratio formula
 
 ## Development Roadmap
 

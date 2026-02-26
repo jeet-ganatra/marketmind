@@ -387,6 +387,69 @@ class TestTradesAndFIFO:
         assert h.total_cost_basis == pytest.approx(4960.00, abs=0.01)
         assert h.avg_cost_basis == pytest.approx(4960.00 / 57, abs=0.01)
 
+    def test_mrgs_stock_split_adjusts_lots(self, repo, user):
+        """
+        MRGS-style stock split (used by Robinhood for some splits like SMCI).
+
+        Unlike SPL where quantity = NEW shares added, MRGS records:
+          - One row with quantity = TOTAL post-split shares (the "receive" side)
+          - One row with quantity = old shares surrendered (the "surrender" side)
+
+        Scenario (SMCI 10:1 split):
+          1. Buy 3 @ $900           → lots: [3@900], cost=$2,700
+          2. MRGS surrender 3 (skipped — qty <= existing)
+          3. MRGS receive 30         → ratio=30/3=10, lots: [30@90], cost=$2,700
+          4. Buy 70 @ $40            → lots: [30@90, 70@40], cost=$2,700+$2,800=$5,500
+          5. Expected: 100 shares, avg=$55.00
+        """
+        # Step 1: Pre-split buy
+        repo.add_trade(self._make_trade(user.id, "SMCI", "buy", 3, 900.00, "2024-01-15"))
+        repo.recalculate_holdings(user.id)
+        h = repo.get_holding(user.id, "SMCI")
+        assert h.shares == pytest.approx(3, abs=0.001)
+        assert h.total_cost_basis == pytest.approx(2700.00, abs=0.01)
+
+        # Step 2: MRGS surrender row (3 shares — will be skipped since qty <= existing)
+        mrgs_surrender = Trade(
+            user_id=user.id,
+            ticker="SMCI",
+            trade_type="buy",
+            shares=3,
+            price_per_share=0.0,
+            total_amount=0.0,
+            trade_date=datetime.strptime("2024-10-01", "%Y-%m-%d"),
+            source="robinhood_csv_mrgs",
+        )
+        repo.add_trade(mrgs_surrender)
+
+        # Step 3: MRGS receive row (30 = total post-split shares)
+        mrgs_receive = Trade(
+            user_id=user.id,
+            ticker="SMCI",
+            trade_type="buy",
+            shares=30,
+            price_per_share=0.0,
+            total_amount=0.0,
+            trade_date=datetime.strptime("2024-10-01", "%Y-%m-%d"),
+            source="robinhood_csv_mrgs",
+        )
+        repo.add_trade(mrgs_receive)
+        repo.recalculate_holdings(user.id)
+        h = repo.get_holding(user.id, "SMCI")
+        # Total cost preserved, shares adjusted via ratio = 30/3 = 10
+        assert h.shares == pytest.approx(30, abs=0.001)
+        assert h.total_cost_basis == pytest.approx(2700.00, abs=0.01)
+        assert h.avg_cost_basis == pytest.approx(90.00, abs=0.01)
+
+        # Step 4: Post-split buy
+        repo.add_trade(self._make_trade(user.id, "SMCI", "buy", 70, 40.00, "2024-11-01"))
+        repo.recalculate_holdings(user.id)
+        h = repo.get_holding(user.id, "SMCI")
+        assert h.shares == pytest.approx(100, abs=0.001)
+        # cost = 30*90 + 70*40 = 2700 + 2800 = 5500
+        assert h.total_cost_basis == pytest.approx(5500.00, abs=0.01)
+        assert h.avg_cost_basis == pytest.approx(55.00, abs=0.01)
+
 
 # ──────────────────────────────────────────────
 # CSV Import

@@ -163,7 +163,8 @@ class PortfolioRepository:
         for trade in trades:
             last_trade = trade.trade_date
             if trade.trade_type == "buy":
-                # Stock split: adjust existing lots instead of adding a $0 lot
+                # Stock split (SPL): quantity = NEW shares added
+                # ratio = (existing + new) / existing
                 if trade.source.endswith("_spl") and lots and trade.price_per_share == 0:
                     existing_shares = sum(lot[0] for lot in lots)
                     if existing_shares > 0.0001:
@@ -171,6 +172,17 @@ class PortfolioRepository:
                         for lot in lots:
                             lot[1] /= ratio  # spread cost across more shares
                             lot[0] *= ratio  # multiply share count
+                # Merger/reorganization (MRGS): quantity = TOTAL post-split shares
+                # ratio = total / existing
+                # Skip surrendered shares (where quantity <= existing — that's the old shares)
+                elif trade.source.endswith("_mrgs") and lots and trade.price_per_share == 0:
+                    existing_shares = sum(lot[0] for lot in lots)
+                    if existing_shares > 0.0001 and trade.shares > existing_shares:
+                        ratio = trade.shares / existing_shares
+                        for lot in lots:
+                            lot[1] /= ratio  # spread cost across more shares
+                            lot[0] *= ratio  # multiply share count
+                    # else: surrendered shares row (qty <= existing), skip it
                 else:
                     lots.append([trade.shares, trade.price_per_share])
                     if first_purchase is None:
