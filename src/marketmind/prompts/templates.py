@@ -129,3 +129,148 @@ Instructions:
 Format your response with a clear heading and short paragraphs. Use bullet points for key \
 takeaways at the end.
 """
+
+# ──────────────────────────────────────────────────────────
+# Phase 2: Portfolio Analysis Prompts
+# ──────────────────────────────────────────────────────────
+
+PORTFOLIO_ANALYSIS_SYSTEM = """You are a senior portfolio analyst providing personalized \
+investment analysis. You analyze an investor's actual portfolio holdings alongside live \
+market data to provide actionable insights.
+
+CRITICAL RULES:
+1. ONLY reference numbers from the provided data. Never invent figures.
+2. If data is missing or "None", say it's unavailable — do NOT guess.
+3. You are a decision-SUPPORT tool, not a financial advisor. Frame insights as analysis, \
+not instructions.
+4. Always note risks and suggest areas for further research.
+5. Consider portfolio concentration, diversification, and risk factors.
+6. NEVER mention the investor's name or identity. Refer to them as "the investor".
+7. Be concise. Portfolio managers value density of insight.
+"""
+
+PORTFOLIO_ANALYSIS_PROMPT = """Analyze the following investment portfolio.
+
+## Portfolio Holdings:
+{holdings_data}
+
+## Current Market Data for Each Holding:
+{market_data}
+
+## Portfolio Summary:
+- Total Holdings: {num_holdings}
+- Total Market Value: ${total_value:,.2f}
+- Total Cost Basis: ${total_cost:,.2f}
+- Overall P&L: ${total_pnl:,.2f} ({total_pnl_pct:+.2f}%)
+
+---
+
+Provide your portfolio analysis covering:
+1. **Portfolio Overview**: Summarize the portfolio composition and total performance.
+2. **Sector/Concentration Risk**: Is the portfolio diversified or concentrated? \
+What risks does the current allocation create?
+3. **Top Performers & Laggards**: Which positions are contributing most (and least) to returns?
+4. **Individual Position Assessment**: For each holding, briefly assess whether the current \
+position size makes sense given current fundamentals.
+5. **Risk Factors**: What macro or sector-specific risks should the investor be watching?
+6. **Actionable Suggestions**: What 2-3 specific actions could improve this portfolio? \
+(e.g., rebalance, take profits, add to positions, hedge)
+7. **Bottom Line**: Summarize the portfolio's health in 2-3 sentences.
+
+If any data is unavailable, note it and adjust your analysis accordingly. \
+Do NOT fill in gaps with assumptions.
+
+{educational_section}
+"""
+
+HOLDING_ANALYSIS_PROMPT = """Analyze the following position in the context of the \
+investor's portfolio.
+
+## Position Details:
+- Ticker: {ticker}
+- Shares: {shares}
+- Average Cost Basis: ${avg_cost:.2f}
+- Total Cost Basis: ${total_cost:.2f}
+- Current Price: ${current_price:.2f}
+- Market Value: ${market_value:.2f}
+- P&L: ${pnl:.2f} ({pnl_pct:+.2f}%)
+
+## Current Fundamentals:
+{fundamental_data}
+
+## Price History (3 months):
+{history_data}
+
+## Analyst Consensus:
+{analyst_data}
+
+## Portfolio Context:
+- This position is {position_pct:.1f}% of the total portfolio
+- Total portfolio value: ${portfolio_value:,.2f}
+
+---
+
+Provide your analysis covering:
+1. **Position Performance**: How has this position performed vs. the broader market?
+2. **Current Valuation**: Is the stock fairly valued at the current price relative to cost basis?
+3. **Position Sizing**: Is {position_pct:.1f}% of portfolio appropriate for this stock's \
+risk profile?
+4. **Hold/Trim/Add Assessment**: Based on fundamentals and current P&L, what makes sense?
+5. **Key Risks**: What could cause this position to underperform?
+6. **Bottom Line**: Summarize your view on this position in 2-3 sentences.
+
+If any data is unavailable, note it and adjust your analysis accordingly. \
+Do NOT fill in gaps with assumptions.
+
+{educational_section}
+"""
+
+POTENTIAL_BUY_PROMPT = """Evaluate the following stock as a potential new purchase \
+for the investor's portfolio.
+
+## Stock: {ticker}
+
+## Current Price Data:
+{price_data}
+
+## Fundamental Data:
+{fundamental_data}
+
+## Price History (3 months):
+{history_data}
+
+## Analyst Consensus:
+{analyst_data}
+
+## Investor's Current Portfolio:
+{portfolio_summary}
+
+---
+
+Evaluate this as a potential addition to the portfolio:
+1. **Investment Thesis**: What's the bull case for buying this stock right now?
+2. **Valuation Assessment**: Is now a good entry point based on fundamentals?
+3. **Portfolio Fit**: How would this stock affect portfolio diversification? \
+Does it add exposure to a new sector or double down on an existing one?
+4. **Risk Assessment**: What's the bear case? What could go wrong?
+5. **Suggested Position Size**: Given the existing portfolio, how large a position \
+would be appropriate? (Express as % of portfolio)
+6. **Entry Strategy**: Buy all at once or dollar-cost average in?
+7. **Bottom Line**: Buy, wait for a pullback, or skip? Summarize in 2-3 sentences.
+
+If any data is unavailable, note it and adjust your analysis accordingly. \
+Do NOT fill in gaps with assumptions.
+
+{educational_section}
+"""
+
+EDUCATIONAL_PORTFOLIO_SECTION = """
+Additionally, this analysis is for a BEGINNER INVESTOR. For every financial metric \
+or concept you mention:
+- Briefly explain what it means in plain English
+- Say whether the value is high, low, or normal
+- Use analogies where helpful
+
+Include a **Key Takeaways for Beginners** section at the end with the 3 most important \
+things a beginner should understand about this analysis.
+"""

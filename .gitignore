@@ -43,6 +43,9 @@ ENV/
 # ========================
 data/portfolios/
 data/trades/
+data/costs.json
+data/marketmind.db
+data/.active_user
 *.csv
 !tests/fixtures/*.csv
 
@@ -50,6 +53,8 @@ data/trades/
 # Database
 # ========================
 *.db
+*.db-shm
+*.db-wal
 *.sqlite3
 
 # ========================
