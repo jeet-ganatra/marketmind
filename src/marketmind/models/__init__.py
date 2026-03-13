@@ -7,6 +7,8 @@ from marketmind.models.schemas import (
     StockPrice,
     Trade,
     User,
+    ValidationIssue,
+    ValidationResult,
     WatchlistItem,
 )
 
@@ -19,5 +21,7 @@ __all__ = [
     "StockPrice",
     "Trade",
     "User",
+    "ValidationIssue",
+    "ValidationResult",
     "WatchlistItem",
 ]

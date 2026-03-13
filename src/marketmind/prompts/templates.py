@@ -41,7 +41,7 @@ COMPREHENSIVE_ANALYSIS_PROMPT = """Analyze the following stock based on the prov
 
 ## Analyst Consensus:
 {analyst_data}
-
+{rag_context}
 ---
 
 Provide your analysis covering:
@@ -73,7 +73,7 @@ This analysis is for a BEGINNER INVESTOR who is still learning financial concept
 
 ## Analyst Consensus:
 {analyst_data}
-
+{rag_context}
 ---
 
 Provide your analysis covering the sections below. For EVERY financial metric you mention \
@@ -162,7 +162,7 @@ PORTFOLIO_ANALYSIS_PROMPT = """Analyze the following investment portfolio.
 - Total Market Value: ${total_value:,.2f}
 - Total Cost Basis: ${total_cost:,.2f}
 - Overall P&L: ${total_pnl:,.2f} ({total_pnl_pct:+.2f}%)
-
+{rag_context}
 ---
 
 Provide your portfolio analysis covering:
@@ -207,7 +207,7 @@ investor's portfolio.
 ## Portfolio Context:
 - This position is {position_pct:.1f}% of the total portfolio
 - Total portfolio value: ${portfolio_value:,.2f}
-
+{rag_context}
 ---
 
 Provide your analysis covering:
@@ -244,7 +244,7 @@ for the investor's portfolio.
 
 ## Investor's Current Portfolio:
 {portfolio_summary}
-
+{rag_context}
 ---
 
 Evaluate this as a potential addition to the portfolio:
@@ -274,3 +274,40 @@ or concept you mention:
 Include a **Key Takeaways for Beginners** section at the end with the 3 most important \
 things a beginner should understand about this analysis.
 """
+
+# ──────────────────────────────────────────────────────────
+# Phase 3B: RAG Context Templates
+# ──────────────────────────────────────────────────────────
+
+RAG_CONTEXT_BLOCK = """
+## Additional Research Context (from SEC filings and recent news)
+{rag_content}
+
+IMPORTANT: The research context above comes from real SEC filings and verified news sources. \
+When describing the company's business, strategy, risks, or recent events, reference this \
+context rather than relying on your training data. If the context contradicts your training \
+data, trust the context as it is more recent. If the context does not cover a topic, \
+say so rather than guessing.
+"""
+
+RAG_PORTFOLIO_CONTEXT_BLOCK = """
+## Recent Filing and News Context (per holding)
+{rag_content}
+
+Reference this context when discussing individual holdings. This comes from actual \
+SEC filings and recent news; use it over your training data for company-specific details.
+"""
+
+RAG_POTENTIAL_BUY_CONTEXT_BLOCK = """
+## Additional Research Context (from SEC filings, news, and sector comparison)
+{rag_content}
+
+IMPORTANT: The research context above comes from real SEC filings and verified news sources. \
+When describing the company's business, strategy, risks, or recent events, reference this \
+context rather than relying on your training data. If the context contradicts your training \
+data, trust the context as it is more recent. If the context does not cover a topic, \
+say so rather than guessing.
+"""
+
+RAG_EDUCATIONAL_NOTE = """ When explaining metrics and analysis, reference specific details \
+from the SEC filings to ground your explanations in real company data."""

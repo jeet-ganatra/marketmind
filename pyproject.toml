@@ -30,6 +30,10 @@ python-dotenv = ">=1.0.0"
 # Utilities
 rich = ">=13.9.0"
 httpx = ">=0.27.0"
+edgartools = "^5.20.2"
+chromadb = "^1.5.2"
+sentence-transformers = "^5.2.3"
+feedparser = "^6.0.12"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.3.0"
@@ -46,6 +50,9 @@ select = ["E", "F", "I", "N", "W", "UP"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "network: tests that require network access (deselect with '-k not network')",
+]
 
 [build-system]
 requires = ["poetry-core"]

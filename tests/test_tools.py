@@ -5,6 +5,8 @@ These tests verify that the tools work and return the right data structures.
 They DON'T call the LLM APIs (to avoid costs in CI).
 """
 
+from pathlib import Path
+
 from marketmind.models.schemas import StockFundamentals, StockPrice
 from marketmind.tools.fundamentals import get_fundamentals
 from marketmind.tools.price import get_stock_price
@@ -44,7 +46,7 @@ def test_cost_tracker_calculation():
     """Test that cost calculation is correct."""
     from marketmind.llm.cost_tracker import CostTracker
 
-    tracker = CostTracker(budget_limit=30.0, data_dir="/tmp/marketmind_test")
+    tracker = CostTracker(budget_limit=30.0, data_dir=Path("/tmp/marketmind_test"))
     cost = tracker.calculate_cost("gpt-4o-mini", input_tokens=1000, output_tokens=500)
 
     # gpt-4o-mini: $0.15/M input, $0.60/M output
@@ -58,6 +60,6 @@ def test_cost_tracker_unknown_model():
     """Test that unknown models return 0 cost (not crash)."""
     from marketmind.llm.cost_tracker import CostTracker
 
-    tracker = CostTracker(budget_limit=30.0, data_dir="/tmp/marketmind_test")
+    tracker = CostTracker(budget_limit=30.0, data_dir=Path("/tmp/marketmind_test"))
     cost = tracker.calculate_cost("some-future-model", input_tokens=1000, output_tokens=500)
     assert cost == 0.0

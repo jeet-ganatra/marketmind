@@ -1,34 +1,40 @@
 """
-MarketMind CLI — The primary user interface.
+MarketMind CLI -- The primary user interface.
 
 Commands:
-  marketmind analyze <TICKER>             — Deep analysis using Claude Sonnet
-  marketmind analyze <TICKER> --explain   — Educational analysis with metric explanations
-  marketmind price <TICKER>               — Quick price check using GPT-4o-mini
-  marketmind learn <TOPIC>                — Learn a financial concept using GPT-4o-mini
-  marketmind cost                         — Show API spending for the current month
-  marketmind check-setup                  — Verify all API keys and dependencies
+  marketmind analyze <TICKER>             -- Deep analysis using Claude Sonnet
+  marketmind analyze <TICKER> --explain   -- Educational analysis with metric explanations
+  marketmind price <TICKER>               -- Quick price check using GPT-4o-mini
+  marketmind learn <TOPIC>                -- Learn a financial concept using GPT-4o-mini
+  marketmind cost                         -- Show API spending for the current month
+  marketmind check-setup                  -- Verify all API keys and dependencies
 
-  marketmind user set <USERNAME>          — Set active user profile
-  marketmind user show                    — Show active user profile
+  marketmind user set <USERNAME>          -- Set active user profile
+  marketmind user show                    -- Show active user profile
 
-  marketmind portfolio show               — Show all holdings with live prices
-  marketmind portfolio add <TICKER> <SHARES> <PRICE>  — Record a buy trade
-  marketmind portfolio remove <TICKER>    — Record a sell trade (full or partial)
-  marketmind portfolio import <CSV_FILE>  — Import trades from Robinhood CSV
-  marketmind portfolio history            — Show trade history
-  marketmind portfolio analyze [TICKER]   — AI analysis of portfolio or single holding
+  marketmind portfolio show               -- Show all holdings with live prices
+  marketmind portfolio add <TICKER> <SHARES> <PRICE>  -- Record a buy trade
+  marketmind portfolio remove <TICKER>    -- Record a sell trade (full or partial)
+  marketmind portfolio import <CSV_FILE>  -- Import trades from Robinhood CSV
+  marketmind portfolio history            -- Show trade history
+  marketmind portfolio analyze [TICKER]   -- AI analysis of portfolio or single holding
 
-  marketmind watchlist add <TICKER>       — Add ticker to watchlist
-  marketmind watchlist show               — Show watchlist
-  marketmind watchlist remove <TICKER>    — Remove ticker from watchlist
+  marketmind watchlist add <TICKER>       -- Add ticker to watchlist
+  marketmind watchlist show               -- Show watchlist
+  marketmind watchlist remove <TICKER>    -- Remove ticker from watchlist
 
-  marketmind evaluate <TICKER>            — Evaluate a stock as a potential buy
+  marketmind evaluate <TICKER>            -- Evaluate a stock as a potential buy
+
+  marketmind ingest filings <TICKER>      -- Ingest SEC filings for a ticker
+  marketmind ingest news [--tickers ...]  -- Ingest financial news
+  marketmind ingest all                   -- Ingest filings + news for all portfolio tickers
+  marketmind ingest status                -- Show ingestion status
 
 Usage:
   poetry run marketmind analyze AAPL
   poetry run marketmind portfolio show
   poetry run marketmind evaluate NVDA --explain
+  poetry run marketmind ingest filings AAPL --type both --quarters 8
 """
 
 from datetime import datetime
@@ -55,10 +61,12 @@ console = Console()
 user_app = typer.Typer(help="Manage user profiles")
 portfolio_app = typer.Typer(help="Portfolio tracking and analysis")
 watchlist_app = typer.Typer(help="Manage your watchlist")
+ingest_app = typer.Typer(help="Ingest SEC filings and news for analysis")
 
 app.add_typer(user_app, name="user")
 app.add_typer(portfolio_app, name="portfolio")
 app.add_typer(watchlist_app, name="watchlist")
+app.add_typer(ingest_app, name="ingest")
 
 
 # ──────────────────────────────────────────────
@@ -384,6 +392,7 @@ def portfolio_history(
 def portfolio_analyze(
     ticker: str = typer.Argument(None, help="Ticker to analyze (omit for full portfolio)"),
     explain: bool = typer.Option(False, "--explain", help="Include beginner-friendly explanations"),
+    no_validate: bool = typer.Option(False, "--no-validate", help="Skip analysis validation step"),
 ) -> None:
     """
     AI-powered portfolio analysis.
@@ -397,15 +406,16 @@ def portfolio_analyze(
         console.print(f"[yellow]⚠ {w}[/yellow]")
 
     db, repo, user = _get_db_and_user()
+    vs = _get_vector_store_if_available()
 
     from marketmind.agent.orchestrator import MarketMindAgent
 
-    agent = MarketMindAgent(settings, db=db)
+    agent = MarketMindAgent(settings, db=db, vector_store=vs)
 
     if ticker:
-        result = agent.analyze_holding(ticker, user.id, explain=explain)
+        result = agent.analyze_holding(ticker, user.id, explain=explain, validate=not no_validate)
     else:
-        result = agent.analyze_portfolio(user.id, explain=explain)
+        result = agent.analyze_portfolio(user.id, explain=explain, validate=not no_validate)
 
     if result.analysis_type == "error":
         console.print(f"\n[red]{result.detailed_analysis}[/red]\n")
@@ -415,9 +425,12 @@ def portfolio_analyze(
     title = f"📊 Portfolio Analysis: {ticker.upper()}" if ticker else "📊 Portfolio Analysis"
     console.print(Panel(result.detailed_analysis, title=title, border_style="blue"))
 
+    _display_validation(result)
+
     meta_table = Table(show_header=False, box=None)
     meta_table.add_row("Model", result.model_used)
-    meta_table.add_row("Cost", f"${result.cost_usd:.4f}")
+    cost_label = f"${result.total_cost_usd:.4f}" if result.total_cost_usd else f"${result.cost_usd:.4f}"
+    meta_table.add_row("Cost", cost_label)
     meta_table.add_row("Timestamp", str(result.timestamp.strftime("%Y-%m-%d %H:%M")))
     console.print(meta_table)
     console.print()
@@ -489,14 +502,317 @@ def watchlist_remove(
 
 
 # ──────────────────────────────────────────────
+# Ingest commands
+# ──────────────────────────────────────────────
+
+
+def _get_vector_store():
+    """Initialize and return a VectorStore instance."""
+    from marketmind.db.vector_store import VectorStore
+
+    settings = get_settings()
+    return VectorStore(data_dir=settings.data_dir, embedding_model=settings.embedding_model)
+
+
+def _get_vector_store_if_available():
+    """Return a VectorStore if ChromaDB data exists, otherwise None."""
+    try:
+        from marketmind.db.vector_store import VectorStore
+
+        settings = get_settings()
+        chroma_dir = settings.data_dir / "chromadb"
+        if not chroma_dir.exists():
+            return None
+        return VectorStore(data_dir=settings.data_dir, embedding_model=settings.embedding_model)
+    except Exception:
+        return None
+
+
+def _get_all_tickers() -> list[str]:
+    """Return sorted list of all tickers from portfolio holdings and watchlist."""
+    _, repo, user = _get_db_and_user()
+    holdings = repo.get_holdings(user.id)
+    watchlist = repo.get_watchlist(user.id)
+    return sorted({h.ticker for h in holdings} | {w.ticker for w in watchlist})
+
+
+@ingest_app.command("filings")
+def ingest_filings(
+    ticker: str = typer.Argument(help="Stock ticker symbol, or 'all' for every portfolio/watchlist ticker"),
+    filing_type: str = typer.Option("both", "--type", help="Filing type: 10-K, 10-Q, or both"),
+    quarters: int = typer.Option(8, "--quarters", help="Number of recent filings to fetch per type"),
+) -> None:
+    """
+    Ingest SEC filings for a ticker (or all portfolio/watchlist tickers).
+
+    Fetches 10-K and/or 10-Q filings, extracts key sections (MD&A, Risk Factors,
+    Business Overview), chunks them, and stores in the local vector database.
+
+    Examples:
+      marketmind ingest filings AAPL --type both --quarters 8
+      marketmind ingest filings all
+    """
+    from marketmind.tools.sec_filings import ingest_company_filings
+
+    settings = get_settings()
+    vs = _get_vector_store()
+
+    if ticker.lower() == "all":
+        tickers = _get_all_tickers()
+        if not tickers:
+            console.print("\n[yellow]No tickers found.[/yellow] Add holdings or watchlist items first.\n")
+            return
+        console.print(
+            f"\n[bold blue]Ingesting {filing_type} filings for {len(tickers)} tickers: "
+            f"{', '.join(tickers)}[/bold blue]\n"
+        )
+        for t in tickers:
+            console.print(f"\n[bold]{t}[/bold] - SEC filings:")
+            result = ingest_company_filings(
+                ticker=t, filing_type=filing_type, num_quarters=quarters,
+                vector_store=vs, settings=settings,
+            )
+            if "error" in result:
+                console.print(f"  [red]{result['error']}[/red]")
+            else:
+                console.print(
+                    f"  {result['num_filings_processed']} filings, "
+                    f"{result['num_chunks_stored']} chunks"
+                )
+        console.print(f"\n[green]Done.[/green]\n")
+        return
+
+    console.print(f"\n[bold blue]Ingesting {filing_type} filings for {ticker.upper()}...[/bold blue]\n")
+
+    result = ingest_company_filings(
+        ticker=ticker,
+        filing_type=filing_type,
+        num_quarters=quarters,
+        vector_store=vs,
+        settings=settings,
+    )
+
+    if "error" in result:
+        console.print(f"\n[red]{result['error']}[/red]\n")
+        raise typer.Exit(1)
+
+    console.print(f"\n[green]Done.[/green]")
+    console.print(f"  Filings processed: {result['num_filings_processed']}")
+    console.print(f"  Chunks stored: {result['num_chunks_stored']}")
+    if result.get("sections_extracted"):
+        console.print(f"  Sections: {', '.join(result['sections_extracted'])}")
+    console.print()
+
+
+@ingest_app.command("news")
+def ingest_news_cmd(
+    target: str = typer.Argument(None, help="'all' for every portfolio/watchlist ticker, or omit for unfiltered news"),
+    tickers: str = typer.Option(None, "--tickers", help="Comma-separated ticker symbols to filter news"),
+) -> None:
+    """
+    Fetch and ingest financial news from RSS feeds.
+
+    If tickers are provided (via 'all' or --tickers), only articles mentioning
+    those tickers or their company names are stored.
+
+    Examples:
+      marketmind ingest news                       -- all news, unfiltered
+      marketmind ingest news all                   -- news for portfolio/watchlist tickers
+      marketmind ingest news --tickers AAPL,NVDA   -- news for specific tickers
+    """
+    from marketmind.tools.news_feeds import ingest_news
+
+    vs = _get_vector_store()
+
+    if target and target.lower() == "all":
+        ticker_list = _get_all_tickers()
+        if not ticker_list:
+            console.print("\n[yellow]No tickers found.[/yellow] Add holdings or watchlist items first.\n")
+            return
+    elif tickers:
+        ticker_list = [t.strip().upper() for t in tickers.split(",")]
+    else:
+        ticker_list = None
+
+    label = f" for {', '.join(ticker_list)}" if ticker_list else ""
+
+    console.print(f"\n[bold blue]Ingesting news{label}...[/bold blue]\n")
+
+    result = ingest_news(tickers=ticker_list, vector_store=vs)
+
+    if "error" in result:
+        console.print(f"\n[red]{result['error']}[/red]\n")
+        raise typer.Exit(1)
+
+    console.print(f"\n[green]Done.[/green]")
+    console.print(f"  Articles found: {result['num_articles_found']}")
+    console.print(f"  New articles stored: {result['num_new_stored']}")
+    console.print(f"  Duplicates skipped: {result['num_duplicates_skipped']}")
+    console.print()
+
+
+@ingest_app.command("all")
+def ingest_all() -> None:
+    """
+    Ingest filings and news for all portfolio and watchlist tickers.
+
+    Fetches 10-K and 10-Q filings (last 8 quarters) for every ticker
+    in your portfolio and watchlist, then ingests relevant news.
+    """
+    from marketmind.tools.news_feeds import ingest_news
+    from marketmind.tools.sec_filings import ingest_company_filings
+
+    settings = get_settings()
+    db, repo, user = _get_db_and_user()
+    vs = _get_vector_store()
+
+    # Collect all tickers from portfolio + watchlist
+    holdings = repo.get_holdings(user.id)
+    watchlist = repo.get_watchlist(user.id)
+
+    tickers = list({h.ticker for h in holdings} | {w.ticker for w in watchlist})
+
+    if not tickers:
+        console.print(
+            "\n[yellow]No tickers found.[/yellow] Add holdings or watchlist items first.\n"
+        )
+        db.close()
+        return
+
+    console.print(
+        f"\n[bold blue]Ingesting data for {len(tickers)} tickers: "
+        f"{', '.join(sorted(tickers))}[/bold blue]\n"
+    )
+
+    # Ingest filings for each ticker
+    for ticker in sorted(tickers):
+        console.print(f"\n[bold]{ticker}[/bold] - SEC filings:")
+        result = ingest_company_filings(
+            ticker=ticker,
+            filing_type="both",
+            num_quarters=8,
+            vector_store=vs,
+            settings=settings,
+        )
+        if "error" not in result:
+            console.print(
+                f"  {result['num_filings_processed']} filings, "
+                f"{result['num_chunks_stored']} chunks"
+            )
+
+    # Ingest news
+    console.print(f"\n[bold]News[/bold] - RSS feeds:")
+    news_result = ingest_news(tickers=tickers, vector_store=vs)
+    if "error" not in news_result:
+        console.print(
+            f"  {news_result['num_articles_found']} found, "
+            f"{news_result['num_new_stored']} stored, "
+            f"{news_result['num_duplicates_skipped']} duplicates"
+        )
+
+    console.print(f"\n[green]Ingestion complete.[/green]\n")
+    db.close()
+
+
+@ingest_app.command("status")
+def ingest_status() -> None:
+    """Show what documents have been ingested into the vector store."""
+    vs = _get_vector_store()
+    db, repo, user = _get_db_and_user()
+
+    # Collect all tickers from portfolio + watchlist
+    holdings = repo.get_holdings(user.id)
+    watchlist = repo.get_watchlist(user.id)
+    tickers = sorted({h.ticker for h in holdings} | {w.ticker for w in watchlist})
+
+    table = Table(title="Ingestion Status", show_lines=True)
+    table.add_column("Ticker", style="bold cyan")
+    table.add_column("SEC Filings", justify="right")
+    table.add_column("News", justify="right")
+
+    total_filings = 0
+    total_news = 0
+
+    for ticker in tickers:
+        filings_count = vs.get_document_count("sec_filings", ticker=ticker)
+        news_count = vs.get_document_count("news", ticker=ticker)
+        total_filings += filings_count
+        total_news += news_count
+
+        table.add_row(
+            ticker,
+            str(filings_count) if filings_count else "[dim]0[/dim]",
+            str(news_count) if news_count else "[dim]0[/dim]",
+        )
+
+    table.add_row(
+        "[bold]TOTAL[/bold]",
+        f"[bold]{total_filings}[/bold]",
+        f"[bold]{total_news}[/bold]",
+    )
+
+    console.print()
+    console.print(table)
+    console.print()
+    db.close()
+
+
+# ──────────────────────────────────────────────
 # Top-level commands
 # ──────────────────────────────────────────────
+
+
+def _display_validation(result) -> None:
+    """Display validation results if present."""
+    if not result.validation or not result.validation.was_validated:
+        return
+
+    v = result.validation
+    total_issues = (
+        len(v.unsupported_numbers)
+        + len(v.unsupported_claims)
+        + len(v.contradictions)
+    )
+
+    if v.confidence_score >= 90:
+        color = "green"
+        icon = "✅"
+    elif v.confidence_score >= 70:
+        color = "yellow"
+        icon = "⚠️"
+    else:
+        color = "red"
+        icon = "❌"
+
+    console.print(
+        f"\n[{color}]{icon} Validation: {v.confidence_score}/100 confidence"
+        f" — {total_issues} issue(s) found[/{color}]"
+    )
+
+    if v.unsupported_numbers:
+        console.print(f"  [dim]Unsupported numbers ({len(v.unsupported_numbers)}):[/dim]")
+        for issue in v.unsupported_numbers:
+            console.print(f"    • {issue.claim} — {issue.detail}")
+
+    if v.unsupported_claims:
+        console.print(f"  [dim]Unsupported claims ({len(v.unsupported_claims)}):[/dim]")
+        for issue in v.unsupported_claims:
+            console.print(f"    • {issue.claim} — {issue.detail}")
+
+    if v.contradictions:
+        console.print(f"  [dim]Contradictions ({len(v.contradictions)}):[/dim]")
+        for issue in v.contradictions:
+            console.print(f"    • {issue.claim} — {issue.detail}")
+
+    if v.summary:
+        console.print(f"  [dim]{v.summary}[/dim]")
 
 
 @app.command()
 def analyze(
     ticker: str = typer.Argument(help="Stock ticker symbol (e.g., AAPL, MSFT, NVDA)"),
     explain: bool = typer.Option(False, "--explain", help="Include beginner-friendly explanations of every metric"),
+    no_validate: bool = typer.Option(False, "--no-validate", help="Skip analysis validation step"),
 ) -> None:
     """
     Run a comprehensive AI analysis on a stock.
@@ -519,19 +835,25 @@ def analyze(
 
     db = Database(data_dir=settings.data_dir)
     db.initialize()
-    agent = MarketMindAgent(settings, db=db)
-    result = agent.analyze(ticker, explain=explain)
+    vs = _get_vector_store_if_available()
+    agent = MarketMindAgent(settings, db=db, vector_store=vs)
+    result = agent.analyze(ticker, explain=explain, validate=not no_validate)
 
     # Display results
     console.print(Panel(result.detailed_analysis, title=f"📊 Analysis: {result.ticker}", border_style="blue"))
 
+    _display_validation(result)
+
     # Show metadata
     meta_table = Table(show_header=False, box=None)
     meta_table.add_row("Model", result.model_used)
-    meta_table.add_row("Cost", f"${result.cost_usd:.4f}")
+    cost_label = f"${result.total_cost_usd:.4f}" if result.total_cost_usd else f"${result.cost_usd:.4f}"
+    meta_table.add_row("Cost", cost_label)
     meta_table.add_row("Data Sources", ", ".join(result.data_sources))
     meta_table.add_row("Timestamp", str(result.timestamp.strftime("%Y-%m-%d %H:%M")))
     console.print(meta_table)
+    console.print()
+
     db.close()
 
 
@@ -539,6 +861,7 @@ def analyze(
 def evaluate(
     ticker: str = typer.Argument(help="Stock ticker symbol to evaluate as a potential buy"),
     explain: bool = typer.Option(False, "--explain", help="Include beginner-friendly explanations"),
+    no_validate: bool = typer.Option(False, "--no-validate", help="Skip analysis validation step"),
 ) -> None:
     """
     Evaluate a stock as a potential buy against your current portfolio.
@@ -555,17 +878,21 @@ def evaluate(
         console.print(f"[yellow]⚠ {w}[/yellow]")
 
     db, repo, user = _get_db_and_user()
+    vs = _get_vector_store_if_available()
 
     from marketmind.agent.orchestrator import MarketMindAgent
 
-    agent = MarketMindAgent(settings, db=db)
-    result = agent.evaluate_potential_buy(ticker, user.id, explain=explain)
+    agent = MarketMindAgent(settings, db=db, vector_store=vs)
+    result = agent.evaluate_potential_buy(ticker, user.id, explain=explain, validate=not no_validate)
 
     console.print(Panel(result.detailed_analysis, title=f"🔍 Evaluation: {result.ticker}", border_style="green"))
 
+    _display_validation(result)
+
     meta_table = Table(show_header=False, box=None)
     meta_table.add_row("Model", result.model_used)
-    meta_table.add_row("Cost", f"${result.cost_usd:.4f}")
+    cost_label = f"${result.total_cost_usd:.4f}" if result.total_cost_usd else f"${result.cost_usd:.4f}"
+    meta_table.add_row("Cost", cost_label)
     meta_table.add_row("Data Sources", ", ".join(result.data_sources))
     meta_table.add_row("Timestamp", str(result.timestamp.strftime("%Y-%m-%d %H:%M")))
     console.print(meta_table)
