@@ -51,6 +51,25 @@ class StockFundamentals(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
 
 
+class ValidationIssue(BaseModel):
+    """A single issue found during analysis validation."""
+
+    claim: str
+    detail: str
+
+
+class ValidationResult(BaseModel):
+    """Result of validating an LLM analysis against provided data."""
+
+    unsupported_numbers: list[ValidationIssue] = []
+    unsupported_claims: list[ValidationIssue] = []
+    contradictions: list[ValidationIssue] = []
+    confidence_score: int = 100
+    summary: str = ""
+    validation_cost_usd: float = 0.0
+    was_validated: bool = True
+
+
 class AnalysisResult(BaseModel):
     """Result of an AI-powered stock analysis."""
 
@@ -61,6 +80,8 @@ class AnalysisResult(BaseModel):
     data_sources: list[str]  # Which tools/APIs were used
     model_used: str  # Which LLM generated this
     cost_usd: float  # How much this analysis cost in API fees
+    validation: ValidationResult | None = None
+    total_cost_usd: float = 0.0  # analysis cost + validation cost
     timestamp: datetime = Field(default_factory=datetime.now)
 
 

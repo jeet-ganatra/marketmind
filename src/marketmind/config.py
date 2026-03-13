@@ -51,6 +51,18 @@ class Settings(BaseSettings):
         description="Monthly spending limit in USD",
     )
 
+    # SEC EDGAR
+    sec_edgar_identity: str = Field(
+        default="",
+        description="User-Agent identity for SEC EDGAR (e.g., 'MarketMind you@email.com')",
+    )
+
+    # Embedding Model
+    embedding_model: str = Field(
+        default="all-mpnet-base-v2",
+        description="Sentence-transformers model for local embeddings",
+    )
+
     # Application Settings
     log_level: str = Field(default="INFO")
     data_dir: Path = Field(default=Path("./data"))

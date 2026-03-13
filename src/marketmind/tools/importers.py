@@ -21,12 +21,14 @@ console = Console()
 # Transaction codes that represent actual equity trades
 EQUITY_TRADE_CODES = {"Buy", "Sell"}
 
-# Codes that add shares without a cash purchase (splits, transfers, received shares).
+# Codes that add shares without a cash purchase (splits, mergers, transfers, received shares).
 # Treated as buys at $0 so FIFO has the correct share count.
-SHARE_ADDITION_CODES = {"SPL", "ACATI", "REC"}
+# SPL = stock split (quantity = NEW shares added)
+# MRGS = merger/reorganization (quantity = TOTAL post-action shares)
+SHARE_ADDITION_CODES = {"SPL", "MRGS", "ACATI", "REC"}
 
-# Codes to log but skip (mergers, etc.)
-LOG_CODES = {"MRGS"}
+# Codes to log but skip
+LOG_CODES: set[str] = set()
 
 # Codes to silently ignore (cash, dividends, interest, fees, etc.)
 IGNORE_CODES = {"ACH", "CDIV", "INT", "DTAX", "GOLD", "SLIP", "GDBP", "GPMC", "GMPC", "ABIP", "RTP"}
@@ -154,12 +156,16 @@ def _parse_equity_trade(row: dict, user_id: int, row_num: int) -> Trade | None:
 
 def _parse_share_addition(row: dict, trans_code: str, user_id: int, row_num: int) -> Trade | None:
     """
-    Parse a stock split (SPL), account transfer (ACATI), or received shares (REC).
+    Parse a stock split (SPL), merger (MRGS), account transfer (ACATI),
+    or received shares (REC).
 
     These add shares without a cash purchase. We record them as buys at $0
     so the FIFO lot queue has the correct total share count. The original
     cost basis from prior buys is preserved — these $0 lots just ensure
     post-split/transfer sells don't exceed known shares.
+
+    For MRGS, Robinhood may append "S" to quantity (e.g., "3S" for 3 shares
+    surrendered). We strip trailing letters before parsing.
     """
     try:
         ticker = (row.get("Instrument") or "").strip().upper()
@@ -167,6 +173,10 @@ def _parse_share_addition(row: dict, trans_code: str, user_id: int, row_num: int
             return None
 
         quantity_str = (row.get("Quantity") or "").strip()
+        if not quantity_str:
+            return None
+        # Strip trailing letters (e.g., "3S" → "3") for MRGS surrender rows
+        quantity_str = quantity_str.rstrip("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
         if not quantity_str:
             return None
         shares = float(quantity_str)

@@ -28,6 +28,10 @@ from marketmind.prompts.templates import (
     PORTFOLIO_ANALYSIS_SYSTEM,
     POTENTIAL_BUY_PROMPT,
     QUICK_PRICE_PROMPT,
+    RAG_CONTEXT_BLOCK,
+    RAG_EDUCATIONAL_NOTE,
+    RAG_PORTFOLIO_CONTEXT_BLOCK,
+    RAG_POTENTIAL_BUY_CONTEXT_BLOCK,
     STOCK_ANALYSIS_SYSTEM,
 )
 from marketmind.tools.fundamentals import get_analyst_summary, get_fundamentals
@@ -44,11 +48,20 @@ class MarketMindAgent:
     Phase 2: adds portfolio context, analysis caching, and multi-method analysis.
     """
 
-    def __init__(self, settings: Settings, db=None) -> None:
+    def __init__(self, settings: Settings, db=None, vector_store=None) -> None:
         self.settings = settings
         self.router = LLMRouter(settings)
         self.db = db
         self._repo = None
+        self.rag_retriever = None
+        if vector_store is not None:
+            from marketmind.agent.rag import RAGRetriever
+
+            self.rag_retriever = RAGRetriever(vector_store)
+
+        from marketmind.agent.validator import AnalysisValidator
+
+        self.validator = AnalysisValidator(self.router)
 
     @property
     def repo(self):
@@ -63,7 +76,7 @@ class MarketMindAgent:
     # Phase 1: Single-stock analysis
     # ──────────────────────────────────────────────
 
-    def analyze(self, ticker: str, explain: bool = False) -> AnalysisResult:
+    def analyze(self, ticker: str, explain: bool = False, validate: bool = True) -> AnalysisResult:
         """
         Run a comprehensive analysis on a stock.
 
@@ -110,6 +123,27 @@ class MarketMindAgent:
         history_str = _format_history(history)
         analyst_str = _format_analysts(analysts)
 
+        # Step 2b: Retrieve RAG context if available
+        rag_context = ""
+        if self.rag_retriever:
+            console.print("  📄 Retrieving SEC filings and news context...")
+            retrieved = self.rag_retriever.retrieve_for_stock_analysis(ticker)
+            raw_context = self.rag_retriever.format_context_for_prompt(
+                retrieved, max_words=3000
+            )
+            if raw_context:
+                block = RAG_CONTEXT_BLOCK.format(rag_content=raw_context)
+                if explain:
+                    block += RAG_EDUCATIONAL_NOTE
+                rag_context = block
+                n = retrieved["metadata"]["total_chunks_retrieved"]
+                console.print(f"  [green]Found {n} relevant document chunks[/green]")
+            else:
+                console.print(
+                    "  [dim]No ingested documents found for this ticker. "
+                    "Run 'marketmind ingest filings {0}' for richer analysis.[/dim]".format(ticker)
+                )
+
         template = EDUCATIONAL_ANALYSIS_PROMPT if explain else COMPREHENSIVE_ANALYSIS_PROMPT
         prompt = template.format(
             ticker=ticker,
@@ -118,9 +152,10 @@ class MarketMindAgent:
             history_period="3 months",
             history_data=history_str,
             analyst_data=analyst_str,
+            rag_context=rag_context,
         )
 
-        # Step 3: Call LLM (analysis task → Claude Sonnet)
+        # Step 3: Call LLM (analysis task -> Claude Sonnet)
         console.print("  🤖 Running AI analysis (Claude Sonnet)...\n")
         result = self.router.call(
             prompt=prompt,
@@ -137,10 +172,23 @@ class MarketMindAgent:
             analysis_type=analysis_type,
             summary=_extract_summary(result["content"]),
             detailed_analysis=result["content"],
-            data_sources=_list_data_sources(price, fundamentals, history, analysts),
+            data_sources=_list_data_sources(price, fundamentals, history, analysts)
+            + (["chromadb:sec_filings", "chromadb:news"] if rag_context else []),
             model_used=result["model"],
             cost_usd=cost,
         )
+
+        # Step 5: Validate the analysis
+        if validate:
+            provided_data = {
+                "Price Data": price_str,
+                "Fundamentals": fundamentals_str,
+                "Price History": history_str,
+                "Analyst Consensus": analyst_str,
+            }
+            analysis_result = _run_validation(
+                self.validator, analysis_result, provided_data, rag_context
+            )
 
         # Cache the result
         if self.repo:
@@ -183,7 +231,7 @@ class MarketMindAgent:
     # Phase 2: Portfolio analysis
     # ──────────────────────────────────────────────
 
-    def analyze_portfolio(self, user_id: int, explain: bool = False) -> AnalysisResult:
+    def analyze_portfolio(self, user_id: int, explain: bool = False, validate: bool = True) -> AnalysisResult:
         """
         Analyze the user's entire portfolio.
 
@@ -222,6 +270,21 @@ class MarketMindAgent:
             holdings, prices
         )
 
+        # Retrieve RAG context for portfolio
+        rag_context = ""
+        if self.rag_retriever:
+            console.print("  📄 Retrieving filing and news context for holdings...")
+            tickers = [h.ticker for h in holdings]
+            retrieved = self.rag_retriever.retrieve_for_portfolio_analysis(tickers)
+            raw_context = self.rag_retriever.format_portfolio_context(
+                retrieved, max_words=2000
+            )
+            if raw_context:
+                block = RAG_PORTFOLIO_CONTEXT_BLOCK.format(rag_content=raw_context)
+                if explain:
+                    block += RAG_EDUCATIONAL_NOTE
+                rag_context = block
+
         edu_section = EDUCATIONAL_PORTFOLIO_SECTION if explain else ""
         prompt = PORTFOLIO_ANALYSIS_PROMPT.format(
             holdings_data=holdings_str,
@@ -231,6 +294,7 @@ class MarketMindAgent:
             total_cost=total_cost,
             total_pnl=total_pnl,
             total_pnl_pct=total_pnl_pct,
+            rag_context=rag_context,
             educational_section=edu_section,
         )
 
@@ -243,7 +307,7 @@ class MarketMindAgent:
         )
 
         cost = result["cost_record"].cost_usd if result["cost_record"] else 0
-        return AnalysisResult(
+        analysis_result = AnalysisResult(
             ticker="PORTFOLIO",
             analysis_type="portfolio_educational" if explain else "portfolio",
             summary=_extract_summary(result["content"]),
@@ -253,8 +317,23 @@ class MarketMindAgent:
             cost_usd=cost,
         )
 
+        if validate:
+            provided_data = {
+                "Holdings": holdings_str,
+                "Market Data": "\n".join(market_data_lines),
+                "Portfolio Metrics": (
+                    f"Total Value: ${total_value:,.2f}, Cost: ${total_cost:,.2f}, "
+                    f"P&L: ${total_pnl:,.2f} ({total_pnl_pct:+.2f}%)"
+                ),
+            }
+            analysis_result = _run_validation(
+                self.validator, analysis_result, provided_data, rag_context
+            )
+
+        return analysis_result
+
     def analyze_holding(
-        self, ticker: str, user_id: int, explain: bool = False
+        self, ticker: str, user_id: int, explain: bool = False, validate: bool = True
     ) -> AnalysisResult:
         """Analyze a specific holding in portfolio context."""
         if not self.repo:
@@ -288,6 +367,20 @@ class MarketMindAgent:
         pnl_pct = (pnl / holding.total_cost_basis * 100) if holding.total_cost_basis > 0 else 0
         position_pct = (market_value / total_value * 100) if total_value > 0 else 0
 
+        # Retrieve RAG context for this holding
+        rag_context = ""
+        if self.rag_retriever:
+            console.print("  📄 Retrieving SEC filings and news context...")
+            retrieved = self.rag_retriever.retrieve_for_stock_analysis(ticker)
+            raw_context = self.rag_retriever.format_context_for_prompt(
+                retrieved, max_words=3000
+            )
+            if raw_context:
+                block = RAG_CONTEXT_BLOCK.format(rag_content=raw_context)
+                if explain:
+                    block += RAG_EDUCATIONAL_NOTE
+                rag_context = block
+
         edu_section = EDUCATIONAL_PORTFOLIO_SECTION if explain else ""
         prompt = HOLDING_ANALYSIS_PROMPT.format(
             ticker=ticker,
@@ -303,6 +396,7 @@ class MarketMindAgent:
             analyst_data=_format_analysts(analysts),
             position_pct=position_pct,
             portfolio_value=total_value,
+            rag_context=rag_context,
             educational_section=edu_section,
         )
 
@@ -313,6 +407,11 @@ class MarketMindAgent:
             task_type="analysis",
             max_tokens=8192 if explain else None,
         )
+
+        price_str = _format_price(price)
+        fundamentals_str = _format_fundamentals(fundamentals)
+        history_str = _format_history(history)
+        analyst_str = _format_analysts(analysts)
 
         cost = result["cost_record"].cost_usd if result["cost_record"] else 0
         analysis_result = AnalysisResult(
@@ -325,6 +424,22 @@ class MarketMindAgent:
             model_used=result["model"],
             cost_usd=cost,
         )
+
+        if validate:
+            provided_data = {
+                "Price Data": price_str,
+                "Fundamentals": fundamentals_str,
+                "Price History": history_str,
+                "Analyst Consensus": analyst_str,
+                "Holding Info": (
+                    f"{holding.shares} shares @ ${holding.avg_cost_basis:.2f} avg cost, "
+                    f"Market Value: ${market_value:,.2f}, P&L: ${pnl:,.2f} ({pnl_pct:+.2f}%), "
+                    f"Position: {position_pct:.1f}% of portfolio"
+                ),
+            }
+            analysis_result = _run_validation(
+                self.validator, analysis_result, provided_data, rag_context
+            )
 
         # Cache the result
         self.repo.save_analysis(StockAnalysisCache(
@@ -339,7 +454,7 @@ class MarketMindAgent:
         return analysis_result
 
     def evaluate_potential_buy(
-        self, ticker: str, user_id: int, explain: bool = False
+        self, ticker: str, user_id: int, explain: bool = False, validate: bool = True
     ) -> AnalysisResult:
         """Evaluate a stock as a potential buy given portfolio context."""
         ticker = ticker.upper()
@@ -354,6 +469,7 @@ class MarketMindAgent:
 
         # Get portfolio context
         portfolio_summary = "No portfolio data available."
+        portfolio_tickers: list[str] = []
         if self.repo:
             holdings = self.repo.get_holdings(user_id)
             if holdings:
@@ -361,6 +477,23 @@ class MarketMindAgent:
                 for h in holdings:
                     prices[h.ticker] = get_stock_price(h.ticker)
                 portfolio_summary = _format_portfolio_summary(holdings, prices)
+                portfolio_tickers = [h.ticker for h in holdings]
+
+        # Retrieve RAG context for potential buy evaluation
+        rag_context = ""
+        if self.rag_retriever:
+            console.print("  📄 Retrieving SEC filings, news, and sector context...")
+            retrieved = self.rag_retriever.retrieve_for_potential_buy(
+                ticker, portfolio_tickers
+            )
+            raw_context = self.rag_retriever.format_potential_buy_context(
+                retrieved, max_words=3500
+            )
+            if raw_context:
+                block = RAG_POTENTIAL_BUY_CONTEXT_BLOCK.format(rag_content=raw_context)
+                if explain:
+                    block += RAG_EDUCATIONAL_NOTE
+                rag_context = block
 
         edu_section = EDUCATIONAL_PORTFOLIO_SECTION if explain else ""
         prompt = POTENTIAL_BUY_PROMPT.format(
@@ -370,6 +503,7 @@ class MarketMindAgent:
             history_data=_format_history(history),
             analyst_data=_format_analysts(analysts),
             portfolio_summary=portfolio_summary,
+            rag_context=rag_context,
             educational_section=edu_section,
         )
 
@@ -380,6 +514,11 @@ class MarketMindAgent:
             task_type="analysis",
             max_tokens=8192 if explain else None,
         )
+
+        price_str = _format_price(price)
+        fundamentals_str = _format_fundamentals(fundamentals)
+        history_str = _format_history(history)
+        analyst_str = _format_analysts(analysts)
 
         cost = result["cost_record"].cost_usd if result["cost_record"] else 0
         analysis_result = AnalysisResult(
@@ -392,6 +531,18 @@ class MarketMindAgent:
             model_used=result["model"],
             cost_usd=cost,
         )
+
+        if validate:
+            provided_data = {
+                "Price Data": price_str,
+                "Fundamentals": fundamentals_str,
+                "Price History": history_str,
+                "Analyst Consensus": analyst_str,
+                "Portfolio Context": portfolio_summary,
+            }
+            analysis_result = _run_validation(
+                self.validator, analysis_result, provided_data, rag_context
+            )
 
         # Cache
         if self.repo:
@@ -570,6 +721,51 @@ def _list_data_sources(price, fundamentals, history, analysts) -> list[str]:
     if analysts:
         sources.append("yfinance:analysts")
     return sources
+
+
+def _run_validation(
+    validator,
+    analysis_result: AnalysisResult,
+    provided_data: dict,
+    rag_context: str = "",
+) -> AnalysisResult:
+    """
+    Run validation on an analysis result and attach the ValidationResult.
+
+    Returns the analysis_result with validation and total_cost_usd updated.
+    """
+    console.print("  🔍 Validating analysis for accuracy...")
+    validation = validator.validate(
+        analysis_text=analysis_result.detailed_analysis,
+        provided_data=provided_data,
+        rag_context=rag_context,
+    )
+    analysis_result.validation = validation
+    analysis_result.total_cost_usd = analysis_result.cost_usd + validation.validation_cost_usd
+
+    if validation.was_validated:
+        total_issues = (
+            len(validation.unsupported_numbers)
+            + len(validation.unsupported_claims)
+            + len(validation.contradictions)
+        )
+        if validation.confidence_score >= 90:
+            console.print(
+                f"  [green]Validation passed — confidence: {validation.confidence_score}/100"
+                f" ({total_issues} issues)[/green]"
+            )
+        elif validation.confidence_score >= 70:
+            console.print(
+                f"  [yellow]Validation warning — confidence: {validation.confidence_score}/100"
+                f" ({total_issues} issues)[/yellow]"
+            )
+        else:
+            console.print(
+                f"  [red]Validation concern — confidence: {validation.confidence_score}/100"
+                f" ({total_issues} issues)[/red]"
+            )
+
+    return analysis_result
 
 
 def _error_result(ticker: str, message: str) -> AnalysisResult:
